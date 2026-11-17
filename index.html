@@ -951,18 +951,19 @@
         let userSelectedAnswers = {};
         let currentFontSize = parseFloat(localStorage.getItem('reader_pref_font_size')) || 19.5;
 
-        /* 🏷️ 智能文体单位识别器：仅检测【标题】内的单位，绝不误判散文内文中的“首句/末句” */
-        function getSectionLabel(index) {
-            // 1. 优先读取显式声明的单位变量（如 const sectionUnit = "句"; 或 "节"）
+        /* 🏷️ 智能文体单位识别器：自动兼容 sectionUnit、诗歌 <br> 分节、古诗逐句与宋词上下阕 */
+        function getSectionLabel(index, forcePoetryStanza) {
             if (typeof sectionUnit !== 'undefined' && sectionUnit) {
                 return `第${index}${sectionUnit}`;
+            }
+            if (typeof window.sectionUnit !== 'undefined' && window.sectionUnit) {
+                return `第${index}${window.sectionUnit}`;
             }
             const pMap = (typeof lessonTeacherAnalysis !== 'undefined' && lessonTeacherAnalysis.paragraphs) ? lessonTeacherAnalysis.paragraphs : null;
             const currentRaw = (pMap && pMap[index]) ? pMap[index] : '';
             const firstRaw = (pMap && pMap[1]) ? pMap[1] : '';
             const sample = currentRaw || firstRaw;
 
-            // 仅提取赏析文本最开头的【标题】部分进行嗅探，避免内文出现“末句/首句”误触发
             const headerMatch = sample.match(/【([^】]+)】/);
             const headerText = headerMatch ? headerMatch[1] : '';
 
@@ -971,7 +972,7 @@
             if (/^(?:第[一二三四五六七八九十\d]+句|其[一二三四].*?[·•]\s*(?:首句|次句|第三句|第四句|末句)|首句|次句|第三句|第四句|末句)/.test(headerText)) {
                 return `第${index}句`;
             }
-            if (/^第[一二三四五六七八九十\d]+节/.test(headerText)) return `第${index}节`;
+            if (/^第[一二三四五六七八九十\d]+节/.test(headerText) || forcePoetryStanza) return `第${index}节`;
             if (/^第[一二三四五六七八九十\d]+层/.test(headerText)) return `第${index}层`;
 
             return `第${index}段`;
@@ -980,7 +981,7 @@
         function extractWordMeanings(item) {
             if (!item) return { word: '', pinyin: '', zh: '', zhPlain: '', en: '', bm: '', isProperNoun: false };
             const rawWord = item[0] || '';
-            const word = rawWord.replace(/<\/?u>/g, '');
+            const word = rawWord.replace(/<\/?u>/g, '').replace(/<br\s*\/?>/gi, '');
             const pinyin = item[1] || '';
             let rawEn = (item[2] || '').trim();
             const bm = (item[3] || '').trim();
@@ -1408,10 +1409,13 @@
                 }
             }
 
-            // 检测是否使用了双换行符（如多节现代新诗：节内单换行，节间双换行）
             const hasDoubleNewline = (typeof lessonData !== 'undefined') && lessonData.some((item, idx) => 
-                item[0] === "\n" && idx + 1 < lessonData.length && lessonData[idx + 1][0] === "\n" && idx + 2 < lessonData.length - 8
+                item[0] === "\n" && idx + 1 < lessonData.length && lessonData[iIdxSafe(idx + 1)][0] === "\n" && idx + 2 < lessonData.length - 8
             );
+
+            function iIdxSafe(idx) {
+                return Math.min(idx, lessonData.length - 1);
+            }
 
             function finalizeParagraph(paragraphElement) {
                 if (paragraphElement.childNodes.length === 0) return;
@@ -1430,10 +1434,9 @@
                     cnt.appendChild(paragraphElement);
                 } else {
                     const currentPNum = pNum;
-                    const secLabel = getSectionLabel(currentPNum);
+                    const secLabel = getSectionLabel(currentPNum, hasBrInCurrentP);
                     paragraphElement.id = `article-p-${currentPNum}`;
                     paragraphElement.style.position = "relative";
-                    // 诗歌（分节、逐句或内部含 <br> 分行）自动取消首行 2em 缩进，保持诗行左对齐美观
                     const isPoetryBlock = hasDoubleNewline || hasBrInCurrentP || secLabel.endsWith('句') || secLabel.endsWith('节') || secLabel.endsWith('层');
                     paragraphElement.style.textIndent = isPoetryBlock ? "0" : "2em"; 
                     paragraphElement.style.paddingLeft = "0"; 
@@ -1464,9 +1467,9 @@
             if (typeof lessonData !== 'undefined') {
                 for (let i = 0; i < lessonData.length; i++) {
                     const d = lessonData[i];
-                    const rawToken = (d[0] || '').trim();
+                    const rawToken = String(d[0] || '').trim();
 
-                    // 1. 兼容显式 ["<br>", "", "", ""] 诗行内换行符（绝不再打印出 "<br>" 字符串！）
+                    // 1. 强制拦截任何形式的 <br> 换行标记，绝不印出 "<br>" 文字列
                     if (/^<br\s*\/?>$/i.test(rawToken)) {
                         p.appendChild(document.createElement("br"));
                         hasBrInCurrentP = true;
@@ -1477,7 +1480,7 @@
                             if (i + 1 < lessonData.length && lessonData[i + 1][0] === "\n") {
                                 finalizeParagraph(p);
                                 p = document.createElement("p");
-                                i++; // 跳过第二个换行符
+                                i++;
                             } else if (i >= lessonData.length - 12) {
                                 finalizeParagraph(p);
                                 p = document.createElement("p");
@@ -1490,10 +1493,10 @@
                             p = document.createElement("p");
                         }
                     }
-                    // 3. 普通标点或无注音文本（若内含 <br> 也自动转为换行标签）
-                    else if (d[1] === "") {
+                    // 3. 普通标点或无注音文本（若内含 <br> 也自动拆分为真实换行）
+                    else if (!d[1] || d[1] === "") {
                         if (/<br\s*\/?>/i.test(d[0])) {
-                            const parts = d[0].split(/<br\s*\/?>/i);
+                            const parts = String(d[0]).split(/<br\s*\/?>/i);
                             parts.forEach((part, idx) => {
                                 if (part) {
                                     let s = document.createElement("span");
@@ -1565,8 +1568,6 @@
                 qText.style.marginBottom = "10px";
                 const formattedQuestion = linkifyParagraphReferences(q.question.replace(/\n/g, '<br>')).trim();
 
-                // 📐 修复题号与块级引用框 (QUOTE_BOX) 断行不对齐的问题：
-                // 若题目以 <div 引用框开头，将题号精准嵌入引用框结束标签 </div> 之后的正文问句开头！
                 if (/^<div\b/i.test(formattedQuestion) && formattedQuestion.includes('</div>')) {
                     qText.innerHTML = formattedQuestion.replace('</div>', `</div>${q.id}. `);
                 } else {
